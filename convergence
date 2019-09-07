@@ -1,0 +1,18 @@
+function [pvalor] = convergence(theta_s, S1)
+    % Convergence Diagnostics. Geweke (1999) 
+    MH = (theta_s); 
+    diagnostico = momentg(MH);
+    DPN   = diagnostico.nse1; % desvio padrão numérico.
+    Sa    = round(0.1*S1); % tamanho da amostra A.
+    diagA = momentg(MH(1:Sa,:)); % calcula diagnósticos para a amostra A.
+    meanA = [diagA.pmean]'; % média da posteriori baseada na amostra A.
+    dpnA  = [diagA.nse1]';  % desvio padrão númerico baseado na amostra A.
+    Sc    = round(0.4*S1); % tamanho da amostra C.
+    diagC = momentg(MH(end-Sc+1:end,:)); % calcula diagnósticos para a amostra C.
+    meanC = [diagC.pmean]'; % média da posteriori baseada na amostra C.
+    dpnC  = [diagC.nse1]';  % desvio padrão númerico baseado na amostra C.
+    CD    = (meanA-meanC)./(dpnA+dpnC); % diagnóstico de convergência de Geweke.
+    % Avalia a estatística CD com base em uma N(0,1)
+    pvalor = 1-normcdf(abs(CD));
+end
+
