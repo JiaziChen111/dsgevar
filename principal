@@ -1,0 +1,460 @@
+%Practical Implementation. Del Negro and Schorfheide (2004)
+clear all
+close all
+clc
+
+tic;
+prompt = 'Defina a ordem de defasagem (1, 2, ou 3): ';
+p = input(prompt); %Number of lags (1, 2 or 3) 
+prompt = 'Defina o grid de \lambda. Formato: [\lambda_1, \lambda_2, ... ,\lambda_q]: ';
+lambda_s = input(prompt); %DSGE prior weight
+
+n = 4; %Number of observable variables 
+k = n*p+1; %Number of parameters + constant 
+t = 167-p; %Number of observations 
+pp = 16; %Number of DSGE parameters to be estimated 
+[~,lsize] = size(lambda_s);
+%Preallocation 
+MarginalDensityMHM_lambda = nan(lsize,1); %Marginal Data Density for each \lambda
+theta_lambda = nan(lsize,pp); %mean_theta for each \lambda 
+phi_prior = nan(k,n,lsize); %mean_phi for each \lambda
+Sigma_prior = nan(n,n,lsize); %mean_Sigma_prior for each \lambda
+phi_posterior = nan(k,n,lsize); %mean_phi_post for each \lambda
+Sigma_posterior = nan(n,n,lsize); %mean_Sigma_post for each \lambda
+ar = nan(lsize, 1); %acceptance rate for each \lambda
+
+%%
+for index_lambda = 1:lsize
+    
+lambda = lambda_s(1,index_lambda);
+
+%load data
+load dados_dissertacao.mat
+y_obs = diff(log(IBCBr));
+pi_obs = IPCA(2:end,:);
+q_obs = diff(log(CAMBIO));
+i_obs = JUROS(2:end,:);
+
+%y_{t}
+Y = [y_obs(p+1:end), q_obs(p+1:end), pi_obs(p+1:end), i_obs(p+1:end)];
+
+%y_{t-h}
+if p == 1;
+X = [y_obs(p:end-1,:), q_obs(p:end-1,:), pi_obs(p:end-1,:), i_obs(p:end-1,:), ones(t,1)];
+    elseif p == 2;
+X = [y_obs(p:end-1,:), q_obs(p:end-1,:), pi_obs(p:end-1,:), i_obs(p:end-1,:), y_obs(p-1:end-2,:), q_obs(p-1:end-2,:), pi_obs(p-1:end-2,:), i_obs(p-1:end-2,:), ones(t,1)];    
+else
+X = [y_obs(p:end-1,:), q_obs(p:end-1,:), pi_obs(p:end-1,:), i_obs(p:end-1,:), y_obs(p-1:end-2,:), q_obs(p-1:end-2,:), pi_obs(p-1:end-2,:), i_obs(p-1:end-2,:), y_obs(p-2:end-3,:), q_obs(p-2:end-3,:), pi_obs(p-2:end-3,:), i_obs(p-2:end-3,:), ones(t,1)];        
+end;
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%% Calibration %%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+sigma = 1; %Silveira (2008)
+etta = 2; % Galí and Monacelli (2005)
+gama = 1; % Galí and Monacelli (2005)
+varphi = 0.25; % Silveira (2008)
+theta = 0.5; 
+%betta  = 0.989; % Silveira (2008)
+alppha = 0.12; % Importações/PIB
+% Measurement Equation
+gamma_s = 0.1;
+q_s = -0.1;
+pi_s = 0.5;
+rho = 1;
+% Monetary Policy Parameters 
+phi_pi = 1.75; % Silveira (2008)
+phi_y = 0.5; % Silveira (2008)
+% AR(1) Process
+rho_a = 0.5; % Galí and Monacelli (2005)                                                               
+rho_y = 0.5; % Galí and Monacelli (2005)
+rho_z = 0.5; % Silveira (2008)
+% Shock 
+sig_eps_y = 0.01; % Silveira (2008)
+sig_eps_nu = 0.01; % Silveira (2008)
+sig_eps_z = 0.01; % Silveira (2008)
+sig_eps_a = 0.01; % Silveira (2008)
+% Relations
+betta           = 1/(1+rho);
+omega           = sigma*gama+(1-alppha)*(sigma*etta-1);
+sigma_alppha    = sigma/((1-alppha)+alppha*omega);
+Theta           =(sigma*gama-1)+(1-alppha)*(sigma*etta-1);
+lambbda          = (1-(betta*theta))*(1-theta)/theta;
+kappa           = lambbda*(sigma_alppha+varphi);
+Gamma           = (1+varphi)/(sigma_alppha+varphi);
+Psi             = -Theta*sigma_alppha/(sigma_alppha+varphi);
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%% Parameters of DSGE to be estimated %%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+theta_est(1,1) = sig_eps_a;
+theta_est(2,1) = sig_eps_y;
+theta_est(3,1) = sig_eps_z;
+theta_est(4,1) = sig_eps_nu;
+theta_est(5,1)  = sigma;
+theta_est(6,1)  = varphi;
+theta_est(7,1)  = theta;
+theta_est(8,1)  = phi_pi;
+theta_est(9,1)  = phi_y;
+theta_est(10,1)  = rho_a;
+theta_est(11,1)  = rho_y;
+theta_est(12,1)  = rho_z;
+theta_est(13,1)  = gamma_s;
+theta_est(14,1)  = pi_s;
+theta_est(15,1)  = q_s;
+theta_est(16,1)  = rho;
+
+pp = size(theta_est,1); %Number of DSGE parameters to be estimated 
+
+% 1. For each \lambda, use the Random Walk Metropolis algorithm described in
+%Schorfheide (2000) to generate draws from p(\theta|y) \propto
+%p(y|\theta)*p(\theta).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%% Parameters MCMC %%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+S_total = 2000;
+burnin = 0.5;
+S0 = burnin*S_total; % burnin
+S1 = S_total-S0; %number of draws
+nm = 0; %start the M-H counter
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%% Proposal Density Covariance Matrix %%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%\hat{\Sigma} will be the negative of the inverse Hessian matrix at the
+%mode of the log posterior (log likelihood + log prior), \hat{\theta}. 
+    objective_function_penalty_base = 100000000;
+    % Define the Prior Distribution
+
+    prior.lower = [0;0;0;0;0;0;0;0;0;0;0;0; -inf; -inf; -inf;0];
+    prior.upper = [inf; inf; inf; inf; inf; inf; 1; inf; inf;1;1;1;inf;inf;inf;inf];
+    prior.pshape = [4;4;4;4;2;2;1;2;2;1;1;1;3;3;3;2];
+    prior.mean = [0.01; 0.01; 0.01; 0.01;1;0.25; 0.5; 1.75; 0.5; 0.5; 0.5; 0.5; 0.1; .5;-0.1; 1];
+    prior.var = [4; 4; 4; 4; 0.1; 0.1; 0.15; 0.15; 0.1; 0.15; 0.15; 0.15; 0.15; 0.15; 0.15; 0.5];
+    
+    [bounds] = priordensity(prior.lower, prior.upper, prior.pshape, prior.mean, prior.var);
+    LB = bounds(:,1);
+    UB = bounds(:,2);
+
+opt = optimset('display','iter','MaxFunEvals',1000000,'MaxIter',60000,'TolFun',1e-8,'TolX',1e-6);
+c = 0.5;    
+rng(0);
+[fval,theta_real,grad,hessian_csminwel,itct,fcount,retcodeh] = csminwel1(@(x)dsgevar_posterior(x, alppha, gama, etta, Y, p,lambda,k,X,n),prior.mean,1e-4*eye(pp,pp),[],1e-7,1000,2,1e-6);
+hh = reshape(hessian(@(x)dsgevar_posterior(x, alppha, gama, etta, Y, p,lambda,k,X,n),theta_real, [0.01;1]),pp,pp);  
+invHess = inv(hh);
+V = c*invHess;    
+
+
+%% The steps needed to evaulate p(y|\theta) are as follows. For each \theta: 
+   %i) Solve DSGE model. This leads to a transition equation
+
+    %preallocation 
+    theta_s = nan(S1, pp); 
+    Phi_star_s = nan(k,n,S1); %Equation (22) 
+    Sigma_star_s = nan(n,n,S1); %Equation (23) 
+    Phi_tilde_s = nan(k,n,S1); %Equation (28)
+    Sigma_tilde_s = nan(n,n,S1); %Equation (29)
+    Sigma_u_s = nan(n,n,S1); %S1 draws, Equation (24) - prior DSGE-VAR
+    phi_s = nan(k,n,S1); %S1 draws, Equation (25) - prior DSGE-VAR
+    Sigma_u_post_s = nan(n,n,S1); %S1 draws, Equation (30) - posterior DSGE-VAR
+    phi_post_s = nan(k,n,S1); %S1 draws, Equation (31) - posterior DSGE-VAR
+    logPost_s= nan(S1,1);% log posterior
+    Z_s=nan(4,11,S1);
+    R_s=nan(11,4,S1);
+    %deep parameters
+    npd = 0;
+    it = 0; % number of iterations 
+while it<=S0+S1
+     
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    %%%%%%%%% Proposal Density %%%%%%%%%%
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+     
+    theta_prop = theta_real + mvnrnd(zeros(1,pp),V)';  
+    
+    if all(theta_prop > LB) && all(theta_prop < UB) || theta_prop(8,1)>1
+       [npost_p, ~, ~, exit_flag, logLikeValue_p, logPrior_p, sigma_u_star_p, phi_star_p, Sigma_tilde_p, Phi_tilde_p, GXX_p, mXX_p, Z_p, R_p, T_p] = dsgevar_posterior(theta_prop, alppha, gama, etta, Y, p, lambda,k,X,n);
+        if exit_flag == 0
+        clear('theta_prop');
+        theta_prop = theta_real;
+        continue;
+        end   
+    else
+        clear('theta_prop');
+        theta_prop = theta_real;
+        continue;
+    end
+        
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    %%%%%%%%%% Posterior density (theta_real) %%%%%%%%%%
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  
+    [npost,  ~, ~, exit_flag, logLikeValue, logPrior, sigma_u_star, phi_star, Sigma_tilde, Phi_tilde, GXX, mXX, Z, R, T] = dsgevar_posterior(theta_real, alppha, gama, etta, Y, p, lambda,k,X,n);
+
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    %%%%%%%%%% Probability of move %%%%%%%%%% 
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    
+    MHprob = exp((-npost_p)-(-npost));
+    
+    %Accept or Reject theta_prop
+    if rand<MHprob % update the state with MHprob probability
+       npost = npost_p;
+       theta_real = theta_prop;
+       sigma_u_star = sigma_u_star_p;
+       phi_star = phi_star_p;
+       Sigma_tilde = Sigma_tilde_p;
+       Phi_tilde = Phi_tilde_p;
+       GXX = GXX_p;
+       Z=Z_p;
+       R=R_p;       
+       nm = nm+1; %update the counter 
+    end
+    
+    if it>S0 %burn-in
+       theta_s(it-S0,:) = theta_real'; %deep parameters 
+       Phi_star_s(:,:,it-S0) = phi_star; %Equation (22)
+       Sigma_star_s(:,:,it-S0) = sigma_u_star; %Equation (23)
+       Phi_tilde_s(:,:,it-S0) = Phi_tilde; %Equation (28)    
+       Sigma_tilde_s(:,:,it-S0) = Sigma_tilde; %Equation (29)
+       logPost_s(it-S0,:) = -npost;
+       Z_s(:,:,it-S0) = Z;
+       R_s(:,:,it-S0) = R;
+    end
+    
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    %%%%%%%%%% DSGE-VAR %%%%%%%%%%
+    %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    
+    %Prior
+    %parameters of Inverted Wishart distribution
+    s0 = lambda*t*sigma_u_star; %covariance matrix 
+    v0 = lambda*t-k; %degrees of freedom 
+    [~,g] = cholcov(s0);
+    if g ~=0
+        s0 = nearestSPD(s0);
+        npd = npd+1;
+    end;
+    Sigma_u = iwishrnd(s0,v0); %sigma_u | theta
+    
+    %parameters of the Normal distribution
+    mu = vec(phi_star); %mean
+    Sigma = kron(Sigma_u, inv(lambda*t*GXX)); %covariance matrix
+    [~,g] = cholcov(Sigma);
+    if g ~=0
+        Sigma = nearestSPD(Sigma);
+        npd = npd+1;
+    end;
+    phi = mvnrnd(mu, Sigma); %phi| Sigma_u, theta
+    phi = reshape(phi,k,n);
+    
+    %Posterior
+    %parameters of Inverted Wishart distribution
+    s0_post = (lambda+1)*t*Sigma_tilde; %covariance matrix
+    v0_post = (lambda+1)*t-k; %degrees of freedom       
+    [~,g] = cholcov(s0_post);
+    if g ~=0
+        s0_post = nearestSPD(s0_post);
+        npd = npd+1;
+    end;
+    Sigma_u_post = iwishrnd(s0_post,v0_post); %sigma_u | theta
+    
+    %parameters of the Normal distribution
+    mu_post = vec(Phi_tilde); %mean
+    Sigma_post = kron(Sigma_u_post, inv(lambda*t*GXX+mXX)); %covariance matrix
+    [~,g] = cholcov(Sigma_post);
+    if g ~=0
+        Sigma_post = nearestSPD(Sigma_post);
+        npd = npd+1;
+    end;
+    phi_post = mvnrnd(mu_post, Sigma_post); %phi| sigma_u, theta
+    phi_post = reshape(phi_post,k,n);
+%% Forecast
+[Y_s] = forecast_one_step(Y, phi_post);
+if it>S0
+    Y_one(:,:,it-S0)=Y_s;
+end
+
+%%    
+    if it>S0
+       phi_s(:,:,it-S0) = phi;   %Equation (24)
+       Sigma_u_s(:,:,it-S0) = Sigma_u; %Equation (25)
+       phi_post_s(:,:,it-S0) = phi_post; %Equation (29)
+       Sigma_u_post_s(:,:,it-S0) = Sigma_u_post; %Equation (30)
+    end  
+    it = it+1;
+    ar_t = nm/(S1+S0); %acceptance rate
+ end   
+    ar(index_lambda,1) = nm/(S1+S0); %acceptance rate
+    
+    %DSGE
+    mean_theta = mean(theta_s);
+    mode_theta = mode(theta_s);
+    var_theta = var(theta_s);
+    %DSGE-VAR
+    mean_Sigma_u = mean(Sigma_u_s,3);
+    mean_phi = mean(phi_s,3);
+    mean_Sigma_u_post = mean(Sigma_u_post_s,3);
+    mean_phi_post = mean(phi_post_s,3);
+    
+    [pvalor] = convergence(theta_s, S1);
+    fprintf('P-valor para a hipótese nula de convergência da cadeia de Markov %1.2f\n',pvalor)
+    pvalor_lambda(:,:,index_lambda) = pvalor;
+%%    
+%2. Based on these draws apply Geweke's (1999) modified harmonic mean
+%estimator to obtain numerical approximations of the data densities
+%p_{\lambda}(Y).
+CovProb = 0.1:0.1:0.9;
+[LogMargs,~,~] = MargLikeModifiedHarmonic(theta_s,logPost_s,0,CovProb,[]);
+MarginalDensityMHM = mean(LogMargs(:,2:end));
+
+MarginalDensityMHM_lambda(index_lambda,:)=MarginalDensityMHM;
+
+theta_lambda(index_lambda,:)= mean_theta;
+phi_prior(:,:,index_lambda) = mean_phi;
+Sigma_prior(:,:,index_lambda)= mean_Sigma_u;
+phi_posterior(:,:,index_lambda) = mean_phi_post;
+Sigma_posterior(:,:,index_lambda) = mean_Sigma_u_post;
+theta_s_final(:,:,index_lambda) = theta_s;
+end
+
+%% 3. Find the presample size \hat{\lambda} that has the highest data
+%density.
+hat_lambda = max(MarginalDensityMHM_lambda);
+[max_value, max_index]=max(MarginalDensityMHM_lambda(:));
+[ilambda,~] = ind2sub(size(MarginalDensityMHM_lambda),max_index);
+
+%% 4. Select draws of {\theta_{s}} that correspond to \hat{\lambda} and use
+%standard methods to generate draws from p(\phi, \sigma_u | Y, \theta_{s})
+%(see Equations (30) and (31)) for each \theta_{s}.
+theta_final = theta_s_final(:,:,ilambda);    
+theta_lambda = theta_lambda(ilambda,:);
+phi_prior = phi_prior(:,:,ilambda);
+Sigma_prior = Sigma_prior(:,:,ilambda);
+phi_posterior = phi_posterior(:,:,ilambda);
+Sigma_posterior = Sigma_posterior(:,:,ilambda);
+
+%HPDI posterior
+hpdi_post = nan(pp,2);
+for np=1:pp
+xx = theta_final(:,np);
+xx = sort(xx);
+  
+number_of_draws = length(xx);
+hpd_draws = round((1-0.9)*number_of_draws);
+ 
+if hpd_draws>2
+   kk = zeros(hpd_draws,1);
+     jj = number_of_draws-hpd_draws;
+     for ii = 1:hpd_draws
+         kk(ii) = xx(jj)-xx(ii);
+         jj = jj + 1;
+     end
+     [kmin,idx] = min(kk);
+     hpd_interval = [xx(idx) xx(idx)+kmin];
+     hpdi_post(np,:)=hpd_interval;
+ else
+     hpd_interval=NaN(1,2);    
+end
+end
+
+toc;
+%% Impulse Response Function
+h = 10;
+A0_s = nan(n,n,S1);
+IRF_final= nan(n,n,h+1,S1);
+IRF_finaldsge = nan(n,n,h+1,S1);
+MeanIRF = nan(n,n,h);
+hpd_inf = nan(n,n,h);
+hpd_sup = nan(n,n,h);
+MeanIRF_DSGE = nan(n,n,h);
+hpd_infdsge = nan(n,n,h);
+hpd_supdsge = nan(n,n,h);
+
+for i=1:S1;
+Sigma_chol = Sigma_u_post_s(:,:,i);
+SigmapostCholeski = chol(Sigma_chol)'; %Cholesky decomposition of \Sigma_u
+A0 = Z_s(:,:,i)*R_s(:,:,i); %contemporaneous effect of \epsilon_t on x_t
+A0_s(:,:,i)=A0;
+[qq, rr] = qr(A0'); %QR factorization
+% where Q is orthonormal and R is upper triangular
+% now make sure that the diagonal of R has only
+% positive entries
+Dvec = diag(rr);
+AllElem = (1:n)';
+PosElem = (Dvec>0).*AllElem;
+PosElem = PosElem(PosElem>0);
+NegElem = setdiff(AllElem,PosElem);
+S = zeros(n,1);
+S(PosElem) = 1;
+S(NegElem) = -1;
+S = diag(S);
+qq = qq*S;
+A = SigmapostCholeski*qq'; %identification procedure (\Omega=\Omega^*) 
+phi_post_irf = phi_post_s(2:end,:,i); %without constant
+IRF = DSGEVARImpulseResponses(phi_post_irf',A,p,h,1,1,12,[]);
+IRF_final(:,:,:,i) = IRF;
+end
+kdx=0;
+for j = 1:n %variables
+    for i = 1:n %shocks
+        for k = 1:h %horizon IRF
+            kk=k+kdx;
+   [MeanIRF(j,i,kk),hpd_inf(j,i,kk), hpd_sup(j,i,kk)] = posterior_moments(IRF_final(j,i,k,:),0.9);
+        end 
+    end
+end
+
+for i=1:S1; 
+phi_irf = phi_s(2:end,:,i);
+IRF_dsge = DSGEVARImpulseResponses(phi_irf',A0_s(:,:,i),p,h,1,1,12,[]);
+IRF_finaldsge(:,:,:,i) = IRF_dsge;
+end
+kdx=0;
+for j = 1:n 
+    for i = 1:n
+        for k = 1:h
+            kk=k+kdx;
+   [MeanIRF_DSGE(j,i,kk),hpd_infdsge(j,i,kk), hpd_supdsge(j,i,kk)] = posterior_moments(IRF_finaldsge(j,i,k,:),0.9);
+        end 
+    end
+end
+%%
+% YResponses = nan(n,h);
+% DSGE = nan(n,h);
+% inf = nan(n,h);
+% sup = nan(n,h);
+% inf_dsge = nan(n,h);
+% sup_dsge = nan(n,h);
+% label = char('y_t', '\pi_t', 'q_t', 'i_t');
+% varname = char('\epsilon^i_t', '\epsilon^a_t', '\epsilon^y_t', '\epsilon^z_t');
+% for j = 1:n 
+%     figure(j+4)
+%     for i=1:h;  
+%     YResponses(:,i) = MeanIRF(:,j,i);
+%     DSGE(:,i) = MeanIRF_DSGE(:,j,i);
+%     inf(:,i) = hpd_inf(:,j,i);
+%     sup(:,i) = hpd_sup(:,j,i);
+%     inf_dsge(:,i) = hpd_infdsge(:,j,i);
+%     sup_dsge(:,i) = hpd_supdsge(:,j,i);
+%     end;
+%     for i = 1:n
+%     Xvector = (1:1:h)-1;
+%     subplot(2,2,i);
+%     plot(Xvector, YResponses(i,:),'--k', 'LineWidth',2);
+%     hold on
+%     plot(Xvector, DSGE(i,:),'-r','LineWidth',2);
+%     hold on
+%     plot (Xvector, inf(i,:), '--k','linewidth',0.5);
+%     hold on
+%     plot (Xvector, sup(i,:),'--k','linewidth',0.5);
+%     hold on
+%     plot (Xvector, inf_dsge(i,:),'-r','linewidth',0.5);
+%     hold on
+%     plot (Xvector, sup_dsge(i,:),'-r','linewidth',0.5);
+%     axis 'tight'
+%     title(varname(j,:));
+%     ylabel(label(i,:)) 
+%     end
+% end 
